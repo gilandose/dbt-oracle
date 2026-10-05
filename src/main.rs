@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use sqlparser::parser::Parser;
+use sqlparser::dialect::DuckDbDialect;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct Column {
@@ -39,6 +41,30 @@ struct Backend {
     client: Client,
     document_map: DashMap<String, String>,
     manifest: DashMap<String, Manifest>,
+}
+
+fn strip_jinja(sql: &str) -> String {
+    let mut result = String::new();
+    let mut in_jinja = false;
+    let mut chars = sql.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if !in_jinja && c == '{' && chars.peek() == Some(&'{') {
+            in_jinja = true;
+            chars.next(); // consume second '{'
+            result.push_str("jinja_macro");
+            continue;
+        }
+        if in_jinja && c == '}' && chars.peek() == Some(&'}') {
+            in_jinja = false;
+            chars.next(); // consume second '}'
+            continue;
+        }
+        if !in_jinja {
+            result.push(c);
+        }
+    }
+    result
 }
 
 impl Backend {
@@ -180,17 +206,6 @@ impl Backend {
 
     async fn publish_diagnostics(&self, uri: Url, text: String) {
         let mut diagnostics = Vec::new();
-        let upper_text = text.to_uppercase();
-        if upper_text.contains("SELECT") && !upper_text.contains("FROM") {
-            diagnostics.push(Diagnostic {
-                range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 6 } },
-                severity: Some(DiagnosticSeverity::WARNING),
-                code: Some(NumberOrString::String("SQL_NO_FROM".to_string())),
-                source: Some("dbt-oracle".to_string()),
-                message: "SELECT statement appears to be missing a FROM clause".to_string(),
-                ..Default::default()
-            });
-        }
         
         let open_tags = text.matches("{{").count();
         let close_tags = text.matches("}}").count();
@@ -204,6 +219,21 @@ impl Backend {
                 ..Default::default()
             });
         }
+
+        // Run actual DuckDB SQL parser validation!
+        let stripped_sql = strip_jinja(&text);
+        let dialect = DuckDbDialect {};
+        if let Err(e) = Parser::parse_sql(&dialect, &stripped_sql) {
+            diagnostics.push(Diagnostic {
+                range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 10 } },
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("SQL_SYNTAX_ERROR".to_string())),
+                source: Some("dbt-oracle".to_string()),
+                message: format!("Syntax Error: {}", e),
+                ..Default::default()
+            });
+        }
+
         self.client.publish_diagnostics(uri, diagnostics, None).await;
     }
 }
@@ -283,7 +313,6 @@ impl LanguageServer for Backend {
     async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let mut completions = Vec::new();
 
-        // 1. Dynamic Models
         let models = self.get_model_names();
         for model in models {
             completions.push(CompletionItem {
@@ -295,7 +324,6 @@ impl LanguageServer for Backend {
             });
         }
 
-        // 2. Dynamic Sources
         let sources = self.get_source_names();
         for (source, table) in sources {
             completions.push(CompletionItem {
@@ -307,24 +335,13 @@ impl LanguageServer for Backend {
             });
         }
 
-        // 3. Dialect Specific: Snowflake
         completions.push(CompletionItem {
             label: "QUALIFY".to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
             detail: Some("Snowflake: QUALIFY Clause".to_string()),
-            documentation: Some(Documentation::String("Filters the results of window functions.".to_string())),
-            ..Default::default()
-        });
-        completions.push(CompletionItem {
-            label: "FLATTEN".to_string(),
-            kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some("Snowflake: FLATTEN Table Function".to_string()),
-            insert_text: Some("TABLE(FLATTEN(input => ${1:variant_column}))".to_string()),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         });
 
-        // 4. Dialect Specific: DuckDB
         completions.push(CompletionItem {
             label: "read_parquet".to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
@@ -333,34 +350,52 @@ impl LanguageServer for Backend {
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         });
-        completions.push(CompletionItem {
-            label: "PIVOT".to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            detail: Some("DuckDB: PIVOT Clause".to_string()),
-            insert_text: Some("PIVOT ${1:dataset} ON ${2:column} USING ${3:sum}(${4:value})".to_string()),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            ..Default::default()
-        });
-        completions.push(CompletionItem {
-            label: "COLUMNS".to_string(),
-            kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some("DuckDB: COLUMNS(*) Regex".to_string()),
-            insert_text: Some("COLUMNS('${1:regex_pattern}')".to_string()),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            ..Default::default()
-        });
-
-        // 5. Dialect Specific: Apache Iceberg
-        completions.push(CompletionItem {
-            label: "iceberg_config".to_string(),
-            kind: Some(CompletionItemKind::SNIPPET),
-            detail: Some("Iceberg: Table Configuration".to_string()),
-            insert_text: Some("config(\n    materialized='table',\n    file_format='iceberg',\n    partition_by=['${1:column_name}']\n)".to_string()),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            ..Default::default()
-        });
 
         Ok(Some(CompletionResponse::Array(completions)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_jinja_ref() {
+        let sql = "SELECT * FROM {{ ref('stg_customers') }}";
+        let stripped = strip_jinja(sql);
+        assert_eq!(stripped, "SELECT * FROM jinja_macro");
+    }
+
+    #[test]
+    fn test_strip_jinja_config() {
+        let sql = "{{ config(materialized='table') }}\nSELECT * FROM data";
+        let stripped = strip_jinja(sql);
+        assert_eq!(stripped, "jinja_macro\nSELECT * FROM data");
+    }
+
+    #[test]
+    fn test_duckdb_sql_validation_valid() {
+        let sql = "SELECT customer_id FROM jinja_macro";
+        let dialect = DuckDbDialect {};
+        let result = Parser::parse_sql(&dialect, sql);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_duckdb_sql_validation_invalid() {
+        let sql = "SELECT FROM table"; // Missing column before FROM
+        let dialect = DuckDbDialect {};
+        let result = Parser::parse_sql(&dialect, sql);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_duckdb_specific_sql() {
+        // Test duckdb-specific extensions parse ok
+        let sql = "SELECT * FROM read_parquet('data.parquet')";
+        let dialect = DuckDbDialect {};
+        let result = Parser::parse_sql(&dialect, sql);
+        assert!(result.is_ok());
     }
 }
 
