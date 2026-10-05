@@ -1,14 +1,14 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlparser::dialect::DuckDbDialect;
+use sqlparser::parser::Parser;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use sqlparser::parser::Parser;
-use sqlparser::dialect::DuckDbDialect;
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct Column {
@@ -47,7 +47,7 @@ fn strip_jinja(sql: &str) -> String {
     let mut result = String::new();
     let mut in_jinja = false;
     let mut chars = sql.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if !in_jinja && c == '{' && chars.peek() == Some(&'{') {
             in_jinja = true;
@@ -71,15 +71,19 @@ impl Backend {
     async fn load_manifest(&self) {
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let manifest_path = workspace_root.join("target").join("manifest.json");
-        
+
         if let Ok(content) = fs::read_to_string(&manifest_path) {
             if let Ok(parsed) = serde_json::from_str::<Manifest>(&content) {
                 self.manifest.insert("default".to_string(), parsed);
-                self.client.log_message(MessageType::INFO, "Successfully loaded dbt manifest.json").await;
+                self.client
+                    .log_message(MessageType::INFO, "Successfully loaded dbt manifest.json")
+                    .await;
                 return;
             }
         }
-        self.client.log_message(MessageType::WARNING, "No target/manifest.json found.").await;
+        self.client
+            .log_message(MessageType::WARNING, "No target/manifest.json found.")
+            .await;
     }
 
     fn get_model_names(&self) -> Vec<String> {
@@ -95,7 +99,7 @@ impl Backend {
         }
         names
     }
-    
+
     fn get_source_names(&self) -> Vec<(String, String)> {
         let mut sources = Vec::new();
         if let Some(manifest) = self.manifest.get("default") {
@@ -103,7 +107,7 @@ impl Backend {
                 for (_, val) in source_nodes {
                     if let (Some(source_name), Some(table_name)) = (
                         val.get("source_name").and_then(|n| n.as_str()),
-                        val.get("name").and_then(|n| n.as_str())
+                        val.get("name").and_then(|n| n.as_str()),
                     ) {
                         sources.push((source_name.to_string(), table_name.to_string()));
                     }
@@ -140,8 +144,12 @@ impl Backend {
                         for (col_name, col_data) in columns {
                             if col_name.eq_ignore_ascii_case(word) {
                                 let dtype = col_data.data_type.as_deref().unwrap_or("UNKNOWN");
-                                let desc = col_data.description.as_deref().unwrap_or("No description");
-                                info.push(format!("**Model**: `{}`\n**Type**: `{}`\n**Desc**: {}", node.name, dtype, desc));
+                                let desc =
+                                    col_data.description.as_deref().unwrap_or("No description");
+                                info.push(format!(
+                                    "**Model**: `{}`\n**Type**: `{}`\n**Desc**: {}",
+                                    node.name, dtype, desc
+                                ));
                             }
                         }
                     }
@@ -167,11 +175,22 @@ impl Backend {
                             }
                         }
                         let downstream = self.get_downstream_models(unique_id);
-                        
-                        let up_str = if upstream.is_empty() { "None".to_string() } else { upstream.join(", ") };
-                        let down_str = if downstream.is_empty() { "None".to_string() } else { downstream.join(", ") };
-                        
-                        return Some(format!("### Model: `{}`\n\n**⬆️ Upstream Dependencies:**\n{}\n\n**⬇️ Downstream Dependents:**\n{}", node.name, up_str, down_str));
+
+                        let up_str = if upstream.is_empty() {
+                            "None".to_string()
+                        } else {
+                            upstream.join(", ")
+                        };
+                        let down_str = if downstream.is_empty() {
+                            "None".to_string()
+                        } else {
+                            downstream.join(", ")
+                        };
+
+                        return Some(format!(
+                            "### Model: `{}`\n\n**⬆️ Upstream Dependencies:**\n{}\n\n**⬇️ Downstream Dependents:**\n{}",
+                            node.name, up_str, down_str
+                        ));
                     }
                 }
             }
@@ -184,18 +203,26 @@ impl Backend {
             let lines: Vec<&str> = text.lines().collect();
             if let Some(line) = lines.get(position.line as usize) {
                 let char_idx = position.character as usize;
-                if char_idx >= line.len() { return None; }
-                
+                if char_idx >= line.len() {
+                    return None;
+                }
+
                 let mut start = char_idx;
-                while start > 0 && (line.chars().nth(start - 1).unwrap().is_alphanumeric() || line.chars().nth(start - 1).unwrap() == '_') {
+                while start > 0
+                    && (line.chars().nth(start - 1).unwrap().is_alphanumeric()
+                        || line.chars().nth(start - 1).unwrap() == '_')
+                {
                     start -= 1;
                 }
-                
+
                 let mut end = char_idx;
-                while end < line.len() && (line.chars().nth(end).unwrap().is_alphanumeric() || line.chars().nth(end).unwrap() == '_') {
+                while end < line.len()
+                    && (line.chars().nth(end).unwrap().is_alphanumeric()
+                        || line.chars().nth(end).unwrap() == '_')
+                {
                     end += 1;
                 }
-                
+
                 if start < end {
                     return Some(line[start..end].to_string());
                 }
@@ -206,12 +233,21 @@ impl Backend {
 
     async fn publish_diagnostics(&self, uri: Url, text: String) {
         let mut diagnostics = Vec::new();
-        
+
         let open_tags = text.matches("{{").count();
         let close_tags = text.matches("}}").count();
         if open_tags != close_tags {
-             diagnostics.push(Diagnostic {
-                range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 1 } },
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: Some(NumberOrString::String("JINJA_TAG_MISMATCH".to_string())),
                 source: Some("dbt-oracle".to_string()),
@@ -225,7 +261,16 @@ impl Backend {
         let dialect = DuckDbDialect {};
         if let Err(e) = Parser::parse_sql(&dialect, &stripped_sql) {
             diagnostics.push(Diagnostic {
-                range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 10 } },
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 10,
+                    },
+                },
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: Some(NumberOrString::String("SQL_SYNTAX_ERROR".to_string())),
                 source: Some("dbt-oracle".to_string()),
@@ -234,7 +279,9 @@ impl Backend {
             });
         }
 
-        self.client.publish_diagnostics(uri, diagnostics, None).await;
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
     }
 }
 
@@ -247,10 +294,17 @@ impl LanguageServer for Backend {
                 version: Some("0.4.0".to_string()),
             }),
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::FULL,
+                )),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec!["{".to_string(), "(".to_string(), "'".to_string(), "\"".to_string()]),
+                    trigger_characters: Some(vec![
+                        "{".to_string(),
+                        "(".to_string(),
+                        "'".to_string(),
+                        "\"".to_string(),
+                    ]),
                     ..Default::default()
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -260,7 +314,9 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "dbt-oracle initialized!").await;
+        self.client
+            .log_message(MessageType::INFO, "dbt-oracle initialized!")
+            .await;
         self.load_manifest().await;
     }
 
@@ -269,25 +325,36 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.document_map.insert(params.text_document.uri.to_string(), params.text_document.text.clone());
-        self.publish_diagnostics(params.text_document.uri, params.text_document.text).await;
+        self.document_map.insert(
+            params.text_document.uri.to_string(),
+            params.text_document.text.clone(),
+        );
+        self.publish_diagnostics(params.text_document.uri, params.text_document.text)
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.first() {
-            self.document_map.insert(params.text_document.uri.to_string(), change.text.clone());
-            self.publish_diagnostics(params.text_document.uri, change.text.clone()).await;
+            self.document_map
+                .insert(params.text_document.uri.to_string(), change.text.clone());
+            self.publish_diagnostics(params.text_document.uri, change.text.clone())
+                .await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.document_map.remove(&params.text_document.uri.to_string());
+        self.document_map
+            .remove(&params.text_document.uri.to_string());
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let position = params.text_document_position_params.position;
-        let uri = params.text_document_position_params.text_document.uri.to_string();
-        
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+
         if let Some(word) = self.extract_word_at_position(&uri, position) {
             if let Some(model_info) = self.find_model_info(&word) {
                 return Ok(Some(Hover {
@@ -295,7 +362,7 @@ impl LanguageServer for Backend {
                     range: None,
                 }));
             }
-            
+
             let column_info = self.find_column_info(&word);
             if !column_info.is_empty() {
                 let mut hover_text = format!("### Column: `{}`\n\n", word);
@@ -306,7 +373,7 @@ impl LanguageServer for Backend {
                 }));
             }
         }
-        
+
         Ok(None)
     }
 
@@ -388,7 +455,7 @@ mod tests {
         let result = Parser::parse_sql(&dialect, sql);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_duckdb_specific_sql() {
         // Test duckdb-specific extensions parse ok
@@ -409,6 +476,6 @@ async fn main() {
         document_map: DashMap::new(),
         manifest: DashMap::new(),
     });
-    
+
     Server::new(stdin, stdout, socket).serve(service).await;
 }
