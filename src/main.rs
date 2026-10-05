@@ -45,24 +45,49 @@ struct Backend {
 
 fn strip_jinja(sql: &str) -> String {
     let mut result = String::new();
-    let mut in_jinja = false;
     let mut chars = sql.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if !in_jinja && c == '{' && chars.peek() == Some(&'{') {
-            in_jinja = true;
-            chars.next(); // consume second '{'
-            result.push_str("jinja_macro");
-            continue;
+        if c == '{' {
+            if let Some(&next_c) = chars.peek() {
+                if next_c == '{' || next_c == '%' || next_c == '#' {
+                    chars.next(); // consume second char
+                    let mut content = String::new();
+
+                    let closing_c = match next_c {
+                        '{' => '}',
+                        '%' => '%',
+                        '#' => '#',
+                        _ => unreachable!(),
+                    };
+
+                    while let Some(inner) = chars.next() {
+                        if inner == closing_c {
+                            if let Some(&'}') = chars.peek() {
+                                chars.next(); // consume '}'
+                                break;
+                            } else {
+                                content.push(inner);
+                            }
+                        } else {
+                            content.push(inner);
+                        }
+                    }
+
+                    if next_c == '{' {
+                        if content.contains("config") {
+                            result.push_str("/* config */");
+                        } else {
+                            result.push_str("jinja_macro");
+                        }
+                    } else {
+                        result.push_str("/* jinja */");
+                    }
+                    continue;
+                }
+            }
         }
-        if in_jinja && c == '}' && chars.peek() == Some(&'}') {
-            in_jinja = false;
-            chars.next(); // consume second '}'
-            continue;
-        }
-        if !in_jinja {
-            result.push(c);
-        }
+        result.push(c);
     }
     result
 }
@@ -418,6 +443,43 @@ impl LanguageServer for Backend {
             ..Default::default()
         });
 
+        completions.push(CompletionItem {
+            label: "FLATTEN".to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("Snowflake: FLATTEN Table Function".to_string()),
+            insert_text: Some("TABLE(FLATTEN(input => ${1:variant_column}))".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+
+        completions.push(CompletionItem {
+            label: "PIVOT".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("DuckDB: PIVOT Clause".to_string()),
+            insert_text: Some(
+                "PIVOT ${1:dataset} ON ${2:column} USING ${3:sum}(${4:value})".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+        completions.push(CompletionItem {
+            label: "COLUMNS".to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("DuckDB: COLUMNS(*) Regex".to_string()),
+            insert_text: Some("COLUMNS('${1:regex_pattern}')".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+
+        completions.push(CompletionItem {
+            label: "iceberg_config".to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some("Iceberg: Table Configuration".to_string()),
+            insert_text: Some("config(\n    materialized='table',\n    file_format='iceberg',\n    partition_by=['${1:column_name}']\n)".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+
         Ok(Some(CompletionResponse::Array(completions)))
     }
 }
@@ -437,7 +499,7 @@ mod tests {
     fn test_strip_jinja_config() {
         let sql = "{{ config(materialized='table') }}\nSELECT * FROM data";
         let stripped = strip_jinja(sql);
-        assert_eq!(stripped, "jinja_macro\nSELECT * FROM data");
+        assert_eq!(stripped, "/* config */\nSELECT * FROM data");
     }
 
     #[test]
