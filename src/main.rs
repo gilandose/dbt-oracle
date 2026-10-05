@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -12,7 +12,6 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct Column {
-    name: String,
     data_type: Option<String>,
     description: Option<String>,
 }
@@ -27,7 +26,6 @@ struct Node {
     name: String,
     columns: Option<HashMap<String, Column>>,
     depends_on: Option<DependsOn>,
-    unique_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -48,44 +46,43 @@ fn strip_jinja(sql: &str) -> String {
     let mut chars = sql.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c == '{' {
-            if let Some(&next_c) = chars.peek() {
-                if next_c == '{' || next_c == '%' || next_c == '#' {
-                    chars.next(); // consume second char
-                    let mut content = String::new();
+        if c == '{'
+            && let Some(&next_c) = chars.peek()
+            && (next_c == '{' || next_c == '%' || next_c == '#')
+        {
+            chars.next(); // consume second char
+            let mut content = String::new();
 
-                    let closing_c = match next_c {
-                        '{' => '}',
-                        '%' => '%',
-                        '#' => '#',
-                        _ => unreachable!(),
-                    };
+            let closing_c = match next_c {
+                '{' => '}',
+                '%' => '%',
+                '#' => '#',
+                _ => unreachable!(),
+            };
 
-                    while let Some(inner) = chars.next() {
-                        if inner == closing_c {
-                            if let Some(&'}') = chars.peek() {
-                                chars.next(); // consume '}'
-                                break;
-                            } else {
-                                content.push(inner);
-                            }
-                        } else {
-                            content.push(inner);
-                        }
-                    }
-
-                    if next_c == '{' {
-                        if content.contains("config") {
-                            result.push_str("/* config */");
-                        } else {
-                            result.push_str("jinja_macro");
-                        }
+            while let Some(inner) = chars.next() {
+                if inner == closing_c {
+                    if let Some(&'}') = chars.peek() {
+                        chars.next(); // consume '}'
+                        break;
                     } else {
-                        result.push_str("/* jinja */");
+                        content.push(inner);
                     }
-                    continue;
+                } else {
+                    content.push(inner);
                 }
             }
+
+            if next_c == '{' {
+                if content.contains("config") {
+                    result.push_str("/* config */");
+                } else {
+                    result.push_str("jinja_macro");
+                }
+            } else {
+                result.push_str("/* jinja */");
+            }
+            continue;
         }
         result.push(c);
     }
@@ -97,14 +94,14 @@ impl Backend {
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let manifest_path = workspace_root.join("target").join("manifest.json");
 
-        if let Ok(content) = fs::read_to_string(&manifest_path) {
-            if let Ok(parsed) = serde_json::from_str::<Manifest>(&content) {
-                self.manifest.insert("default".to_string(), parsed);
-                self.client
-                    .log_message(MessageType::INFO, "Successfully loaded dbt manifest.json")
-                    .await;
-                return;
-            }
+        if let Ok(content) = fs::read_to_string(&manifest_path)
+            && let Ok(parsed) = serde_json::from_str::<Manifest>(&content)
+        {
+            self.manifest.insert("default".to_string(), parsed);
+            self.client
+                .log_message(MessageType::INFO, "Successfully loaded dbt manifest.json")
+                .await;
+            return;
         }
         self.client
             .log_message(MessageType::WARNING, "No target/manifest.json found.")
@@ -113,12 +110,12 @@ impl Backend {
 
     fn get_model_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        if let Some(manifest) = self.manifest.get("default") {
-            if let Some(nodes) = &manifest.nodes {
-                for (key, node) in nodes {
-                    if key.starts_with("model.") {
-                        names.push(node.name.clone());
-                    }
+        if let Some(manifest) = self.manifest.get("default")
+            && let Some(nodes) = &manifest.nodes
+        {
+            for (key, node) in nodes {
+                if key.starts_with("model.") {
+                    names.push(node.name.clone());
                 }
             }
         }
@@ -127,15 +124,15 @@ impl Backend {
 
     fn get_source_names(&self) -> Vec<(String, String)> {
         let mut sources = Vec::new();
-        if let Some(manifest) = self.manifest.get("default") {
-            if let Some(source_nodes) = &manifest.sources {
-                for (_, val) in source_nodes {
-                    if let (Some(source_name), Some(table_name)) = (
-                        val.get("source_name").and_then(|n| n.as_str()),
-                        val.get("name").and_then(|n| n.as_str()),
-                    ) {
-                        sources.push((source_name.to_string(), table_name.to_string()));
-                    }
+        if let Some(manifest) = self.manifest.get("default")
+            && let Some(source_nodes) = &manifest.sources
+        {
+            for (_, val) in source_nodes {
+                if let (Some(source_name), Some(table_name)) = (
+                    val.get("source_name").and_then(|n| n.as_str()),
+                    val.get("name").and_then(|n| n.as_str()),
+                ) {
+                    sources.push((source_name.to_string(), table_name.to_string()));
                 }
             }
         }
@@ -144,16 +141,15 @@ impl Backend {
 
     fn get_downstream_models(&self, target_unique_id: &str) -> Vec<String> {
         let mut downstream = Vec::new();
-        if let Some(manifest) = self.manifest.get("default") {
-            if let Some(nodes) = &manifest.nodes {
-                for (_, node) in nodes {
-                    if let Some(depends) = &node.depends_on {
-                        if let Some(deps) = &depends.nodes {
-                            if deps.contains(&target_unique_id.to_string()) {
-                                downstream.push(node.name.clone());
-                            }
-                        }
-                    }
+        if let Some(manifest) = self.manifest.get("default")
+            && let Some(nodes) = &manifest.nodes
+        {
+            for node in nodes.values() {
+                if let Some(depends) = &node.depends_on
+                    && let Some(deps) = &depends.nodes
+                    && deps.contains(&target_unique_id.to_string())
+                {
+                    downstream.push(node.name.clone());
                 }
             }
         }
@@ -162,20 +158,19 @@ impl Backend {
 
     fn find_column_info(&self, word: &str) -> Vec<String> {
         let mut info = Vec::new();
-        if let Some(manifest) = self.manifest.get("default") {
-            if let Some(nodes) = &manifest.nodes {
-                for (_, node) in nodes {
-                    if let Some(columns) = &node.columns {
-                        for (col_name, col_data) in columns {
-                            if col_name.eq_ignore_ascii_case(word) {
-                                let dtype = col_data.data_type.as_deref().unwrap_or("UNKNOWN");
-                                let desc =
-                                    col_data.description.as_deref().unwrap_or("No description");
-                                info.push(format!(
-                                    "**Model**: `{}`\n**Type**: `{}`\n**Desc**: {}",
-                                    node.name, dtype, desc
-                                ));
-                            }
+        if let Some(manifest) = self.manifest.get("default")
+            && let Some(nodes) = &manifest.nodes
+        {
+            for node in nodes.values() {
+                if let Some(columns) = &node.columns {
+                    for (col_name, col_data) in columns {
+                        if col_name.eq_ignore_ascii_case(word) {
+                            let dtype = col_data.data_type.as_deref().unwrap_or("UNKNOWN");
+                            let desc = col_data.description.as_deref().unwrap_or("No description");
+                            info.push(format!(
+                                "**Model**: `{}`\n**Type**: `{}`\n**Desc**: {}",
+                                node.name, dtype, desc
+                            ));
                         }
                     }
                 }
@@ -185,38 +180,38 @@ impl Backend {
     }
 
     fn find_model_info(&self, word: &str) -> Option<String> {
-        if let Some(manifest) = self.manifest.get("default") {
-            if let Some(nodes) = &manifest.nodes {
-                for (unique_id, node) in nodes {
-                    if node.name.eq_ignore_ascii_case(word) && unique_id.starts_with("model.") {
-                        let mut upstream = Vec::new();
-                        if let Some(depends) = &node.depends_on {
-                            if let Some(deps) = &depends.nodes {
-                                for dep in deps {
-                                    if let Some(dep_node) = nodes.get(dep) {
-                                        upstream.push(dep_node.name.clone());
-                                    }
-                                }
+        if let Some(manifest) = self.manifest.get("default")
+            && let Some(nodes) = &manifest.nodes
+        {
+            for (unique_id, node) in nodes {
+                if node.name.eq_ignore_ascii_case(word) && unique_id.starts_with("model.") {
+                    let mut upstream = Vec::new();
+                    if let Some(depends) = &node.depends_on
+                        && let Some(deps) = &depends.nodes
+                    {
+                        for dep in deps {
+                            if let Some(dep_node) = nodes.get(dep) {
+                                upstream.push(dep_node.name.clone());
                             }
                         }
-                        let downstream = self.get_downstream_models(unique_id);
-
-                        let up_str = if upstream.is_empty() {
-                            "None".to_string()
-                        } else {
-                            upstream.join(", ")
-                        };
-                        let down_str = if downstream.is_empty() {
-                            "None".to_string()
-                        } else {
-                            downstream.join(", ")
-                        };
-
-                        return Some(format!(
-                            "### Model: `{}`\n\n**⬆️ Upstream Dependencies:**\n{}\n\n**⬇️ Downstream Dependents:**\n{}",
-                            node.name, up_str, down_str
-                        ));
                     }
+                    let downstream = self.get_downstream_models(unique_id);
+
+                    let up_str = if upstream.is_empty() {
+                        "None".to_string()
+                    } else {
+                        upstream.join(", ")
+                    };
+                    let down_str = if downstream.is_empty() {
+                        "None".to_string()
+                    } else {
+                        downstream.join(", ")
+                    };
+
+                    return Some(format!(
+                        "### Model: `{}`\n\n**⬆️ Upstream Dependencies:**\n{}\n\n**⬇️ Downstream Dependents:**\n{}",
+                        node.name, up_str, down_str
+                    ));
                 }
             }
         }
